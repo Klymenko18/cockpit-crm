@@ -1,66 +1,73 @@
+"""Management command: batch ingest Entities with idempotent SCD2 semantics.
+
+Supports NDJSON (default) and CSV.
+"""
+
 import csv
 import json
 from pathlib import Path
+from typing import Dict, Any
+
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
-from apps.core.models import EntityType
-from apps.core.services.scd2 import update_entity, update_entity_detail
+
+from apps.core.services.scd2 import scd2_upsert_entity
+
 
 class Command(BaseCommand):
-    help = "Ingest entities and details from JSONL or CSV"
+    help = "Batch ingest of Entities (SCD2 idempotent). Supports NDJSON (default) and CSV."
 
     def add_arguments(self, parser):
-        parser.add_argument("path", type=str)
-        parser.add_argument("--actor", type=str, default="ingest")
-        parser.add_argument("--format", type=str, choices=["jsonl", "csv"], default=None)
+        parser.add_argument("--file", required=True, help="Path to NDJSON/CSV file")
+        parser.add_argument("--format", choices=["ndjson", "csv"], default="ndjson")
+        parser.add_argument("--ts-field", default=None, help="Optional ISO8601 field used as change_ts")
+        parser.add_argument("--uid-field", default="entity_uid", help="Field name for entity_uid")
+        parser.add_argument("--display-name-field", default="display_name", help="Field containing display name")
+        parser.add_argument("--entity-type-id-field", default="entity_type_id", help="Field for entity_type_id")
 
     def handle(self, *args, **opts):
-        path = Path(opts["path"])
+        """Ingest rows and perform SCD2 upserts."""
+        path = Path(opts["file"])
         if not path.exists():
-            raise CommandError("file not found")
-        fmt = opts["format"] or ("jsonl" if path.suffix.lower() in [".jsonl", ".ndjson"] else "csv")
-        actor = opts["actor"]
-        n = 0
-        if fmt == "jsonl":
+            raise CommandError(f"File not found: {path}")
+
+        fmt = opts["format"]
+        ts_field = opts["ts_field"]
+        uid_field = opts["uid_field"]
+        dn_field = opts["display_name_field"]
+        et_field = opts["entity_type_id_field"]
+
+        created = closed = noop = 0
+
+        def _ingest_one(row: Dict[str, Any]):
+            nonlocal created, closed, noop
+            uid = row[uid_field]
+            business = {
+                "display_name": row.get(dn_field, ""),
+                "entity_type_id": row.get(et_field),
+            }
+            ts = timezone.now()
+            if ts_field and row.get(ts_field):
+                ts = timezone.make_aware(timezone.datetime.fromisoformat(row[ts_field]))
+            res = scd2_upsert_entity(entity_uid=uid, change_ts=ts, business=business)
+            if res.created:
+                created += 1
+                if res.closed_prev:
+                    closed += 1
+            else:
+                noop += 1
+
+        if fmt == "ndjson":
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
                         continue
-                    obj = json.loads(line)
-                    self._process_obj(obj, actor)
-                    n += 1
+                    _ingest_one(json.loads(line))
         else:
-            with path.open("r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    obj = {k: (json.loads(v) if k == "value_json" and v else v) for k, v in row.items()}
-                    self._process_obj(obj, actor)
-                    n += 1
-        self.stdout.write(self.style.SUCCESS(f"ingested: {n}"))
+            with path.open("r", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    _ingest_one(row)
 
-    def _process_obj(self, obj, actor):
-        kind = obj.get("kind") or obj.get("type")
-        if kind == "entity":
-            et_code = obj["entity_type"]
-            et = EntityType.objects.get(code=et_code)
-            update_entity(
-                change_ts=timezone.now(),
-                actor=actor,
-                payload={
-                    "entity_uid": obj["entity_uid"],
-                    "display_name": obj["display_name"],
-                    "entity_type_id": et.id,
-                },
-            )
-        elif kind == "detail":
-            update_entity_detail(
-                change_ts=timezone.now(),
-                actor=actor,
-                payload={
-                    "entity_uid": obj["entity_uid"],
-                    "detail_code": obj["detail_code"],
-                    "value_json": obj["value_json"],
-                },
-            )
-        else:
-            raise CommandError("row kind must be 'entity' or 'detail'")
+        self.stdout.write(self.style.SUCCESS(
+            f"Done. created={created}, closed_prev={closed}, noop={noop}"
+        ))
