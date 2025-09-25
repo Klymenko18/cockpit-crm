@@ -6,3 +6,6 @@ django-filter>=24.3
 psycopg2-binary>=2.9.9
 pytest>=8
 pytest-django>=4.8
+
+# app server
+gunicorn>=21.2.0

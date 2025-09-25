@@ -1,6 +1,8 @@
 services:
   db:
     image: postgres:14
+    env_file:
+      - ./.env
     environment:
       POSTGRES_DB: ${DB_NAME}
       POSTGRES_USER: ${DB_USER}
@@ -20,18 +22,28 @@ services:
   app:
     container_name: app
     build:
-      context: ./
+      context: .
       dockerfile: docker/app.Dockerfile
     env_file:
-      - .env
+      - ./.env
     depends_on:
       db:
         condition: service_healthy
-    command: bash -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    command: >
+      bash -lc "python manage.py migrate --noinput &&
+      python -m gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-60} --log-level debug"
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health/'); sys.exit(0)\""]
+      test:
+        - CMD-SHELL
+        - |
+          python - <<'PY'
+          import urllib.request,sys
+          urllib.request.urlopen('http://localhost:8000/health/ready'); sys.exit(0)
+          PY
       interval: 10s
       timeout: 5s
       retries: 20

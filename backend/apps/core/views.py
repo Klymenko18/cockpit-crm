@@ -1,14 +1,10 @@
-from datetime import datetime
-
 from django.db.models import Q, F
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
-
 from rest_framework import status, serializers
 from rest_framework.permissions import IsAuthenticatedOrReadOnly
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
 from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
@@ -51,16 +47,26 @@ from apps.core.serializers import (
     ),
 )
 class EntitiesListCreate(APIView):
+    """Collection endpoint for entities.
+
+    GET returns up to 200 current entities with optional filtering by name,
+    type code, and presence/value of a specific detail.
+
+    POST performs an SCD2 idempotent upsert for the entity and, optionally,
+    for a list of details in the `details` array.
+    """
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request):
-        qs = Entity.objects.filter(is_current=True)
+        queryset = Entity.objects.filter(is_current=True)
         q = request.query_params.get("q")
         if q:
-            qs = qs.filter(display_name__icontains=q)
+            queryset = queryset.filter(display_name__icontains=q)
+
         type_code = request.query_params.get("type")
         if type_code:
-            qs = qs.filter(entity_type__code=type_code)
+            queryset = queryset.filter(entity_type__code=type_code)
+
         detail_code = request.query_params.get("detail_code")
         detail_value = request.query_params.get("detail_value")
         if detail_code:
@@ -70,44 +76,48 @@ class EntitiesListCreate(APIView):
                 is_current=True,
             ).values("entity_uid")
             if detail_value is not None:
-                qs = qs.filter(
+                queryset = queryset.filter(
                     entity_uid__in=EntityDetail.objects.filter(
                         detail_code=detail_code, is_current=True, value_json=detail_value
                     ).values("entity_uid")
                 )
             else:
-                qs = qs.filter(entity_uid__in=sub)
-        data = EntitySnapshotSerializer(qs.order_by("display_name")[:200], many=True).data
+                queryset = queryset.filter(entity_uid__in=sub)
+
+        data = EntitySnapshotSerializer(
+            queryset.order_by("display_name")[:200],
+            many=True
+        ).data
         return Response(data)
 
     def post(self, request):
-        s = EntityUpsertSerializer(
+        """Create entity and optional details via SCD2 upsert semantics."""
+        serializer = EntityUpsertSerializer(
             data=request.data,
             context={"actor": request.user if request.user.is_authenticated else "api"},
         )
-        s.is_valid(raise_exception=True)
-        res = s.save()
+        serializer.is_valid(raise_exception=True)
+        entity_result = serializer.save()
 
         details = request.data.get("details")
-        det_res = []
+        detail_results = []
         if isinstance(details, list):
             for d in details:
-                ds = EntityDetailUpsertSerializer(
+                detail_serializer = EntityDetailUpsertSerializer(
                     data={
-                        "entity_uid": s.validated_data["entity_uid"],
+                        "entity_uid": serializer.validated_data["entity_uid"],
                         "detail_code": d["detail_code"],
                         "value_json": d["value_json"],
                         "change_ts": d.get("change_ts"),
                     },
-                    context={
-                        "actor": request.user if request.user.is_authenticated else "api"
-                    },
+                    context={"actor": request.user if request.user.is_authenticated else "api"},
                 )
-                ds.is_valid(raise_exception=True)
-                det_res.append(ds.save())
-        out = {"entity": res}
-        if det_res:
-            out["details"] = det_res
+                detail_serializer.is_valid(raise_exception=True)
+                detail_results.append(detail_serializer.save())
+
+        out = {"entity": entity_result}
+        if detail_results:
+            out["details"] = detail_results
         return Response(out, status=status.HTTP_201_CREATED)
 
 
@@ -131,27 +141,34 @@ class EntitiesListCreate(APIView):
     ),
 )
 class EntityRetrievePatch(APIView):
+    """Item endpoint for a single entity addressed by `entity_uid`."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, entity_uid):
+        """Return the current entity snapshot or 404 if none exists."""
         obj = Entity.objects.filter(entity_uid=entity_uid, is_current=True).first()
         if not obj:
             return Response({"detail": "not found"}, status=404)
         return Response(EntitySnapshotSerializer(obj).data)
 
     def patch(self, request, entity_uid):
+        """Apply SCD2 upsert to entity and optional details."""
         data = request.data.copy()
         data["entity_uid"] = str(entity_uid)
+
         if "entity_type" in data and not EntityType.objects.filter(code=data["entity_type"]).exists():
             return Response({"detail": "invalid entity_type"}, status=400)
-        res = {}
-        upd = {}
+
+        result = {}
+        entity_result = {}
+
         if set(data.keys()) & {"display_name", "entity_type", "change_ts"}:
             if "entity_type" in data:
                 et = EntityType.objects.get(code=data["entity_type"])
             else:
                 et = Entity.objects.get(entity_uid=entity_uid, is_current=True).entity_type
-            s = EntityUpsertSerializer(
+
+            serializer = EntityUpsertSerializer(
                 data={
                     "entity_uid": entity_uid,
                     "display_name": data.get("display_name")
@@ -159,35 +176,34 @@ class EntityRetrievePatch(APIView):
                     "entity_type": et.code,
                     "change_ts": data.get("change_ts"),
                 },
-                context={
-                    "actor": request.user if request.user.is_authenticated else "api"
-                },
+                context={"actor": request.user if request.user.is_authenticated else "api"},
             )
-            s.is_valid(raise_exception=True)
-            upd = s.save()
+            serializer.is_valid(raise_exception=True)
+            entity_result = serializer.save()
+
         details = data.get("details")
-        det_res = []
+        detail_results = []
         if isinstance(details, list):
             for d in details:
-                ds = EntityDetailUpsertSerializer(
+                detail_serializer = EntityDetailUpsertSerializer(
                     data={
                         "entity_uid": entity_uid,
                         "detail_code": d["detail_code"],
                         "value_json": d["value_json"],
                         "change_ts": d.get("change_ts"),
                     },
-                    context={
-                        "actor": request.user if request.user.is_authenticated else "api"
-                    },
+                    context={"actor": request.user if request.user.is_authenticated else "api"},
                 )
-                ds.is_valid(raise_exception=True)
-                det_res.append(ds.save())
-        res["entity"] = upd or {"status": "noop"}
-        if det_res:
-            res["details"] = det_res
-        return Response(res)
+                detail_serializer.is_valid(raise_exception=True)
+                detail_results.append(detail_serializer.save())
+
+        result["entity"] = entity_result or {"status": "noop"}
+        if detail_results:
+            result["details"] = detail_results
+        return Response(result)
 
     def delete(self, request, entity_uid):
+        """Close the current entity version (SCD2 soft delete)."""
         ts_raw = request.query_params.get("change_ts")
         change_ts = parse_datetime(ts_raw) if ts_raw else timezone.now()
         status_s, _ = close_entity(
@@ -212,32 +228,32 @@ class EntityRetrievePatch(APIView):
     ),
 )
 class EntityDetailListCreate(APIView):
+    """Collection of details for a given entity."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, entity_uid):
-        qs = (
-            EntityDetail.objects.filter(entity_uid=entity_uid, is_current=True)
-            .values("detail_code", "value_json")
-        )
-        return Response({r["detail_code"]: r["value_json"] for r in qs})
+        """Return a flat dict of current details `{code: value}` for the entity."""
+        queryset = EntityDetail.objects.filter(
+            entity_uid=entity_uid, is_current=True
+        ).values("detail_code", "value_json")
+        return Response({r["detail_code"]: r["value_json"] for r in queryset})
 
     def post(self, request, entity_uid):
+        """Create or upsert one or multiple details for the entity."""
         payloads = request.data if isinstance(request.data, list) else [request.data]
         out = []
         for d in payloads:
-            ds = EntityDetailUpsertSerializer(
+            detail_serializer = EntityDetailUpsertSerializer(
                 data={
                     "entity_uid": entity_uid,
                     "detail_code": d["detail_code"],
                     "value_json": d["value_json"],
                     "change_ts": d.get("change_ts"),
                 },
-                context={
-                    "actor": request.user if request.user.is_authenticated else "api"
-                },
+                context={"actor": request.user if request.user.is_authenticated else "api"},
             )
-            ds.is_valid(raise_exception=True)
-            out.append(ds.save())
+            detail_serializer.is_valid(raise_exception=True)
+            out.append(detail_serializer.save())
         return Response(out, status=status.HTTP_201_CREATED)
 
 
@@ -261,9 +277,11 @@ class EntityDetailListCreate(APIView):
     ),
 )
 class EntityDetailRetrievePatchDelete(APIView):
+    """Item endpoint for a single detail identified by `detail_code`."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, entity_uid, detail_code):
+        """Return the current value of the detail or 404 if not present."""
         obj = EntityDetail.objects.filter(
             entity_uid=entity_uid, detail_code=detail_code, is_current=True
         ).first()
@@ -272,7 +290,8 @@ class EntityDetailRetrievePatchDelete(APIView):
         return Response({"detail_code": detail_code, "value_json": obj.value_json})
 
     def patch(self, request, entity_uid, detail_code):
-        ds = EntityDetailUpsertSerializer(
+        """Apply SCD2 upsert to a single detail."""
+        detail_serializer = EntityDetailUpsertSerializer(
             data={
                 "entity_uid": entity_uid,
                 "detail_code": detail_code,
@@ -281,10 +300,11 @@ class EntityDetailRetrievePatchDelete(APIView):
             },
             context={"actor": request.user if request.user.is_authenticated else "api"},
         )
-        ds.is_valid(raise_exception=True)
-        return Response(ds.save())
+        detail_serializer.is_valid(raise_exception=True)
+        return Response(detail_serializer.save())
 
     def delete(self, request, entity_uid, detail_code):
+        """Close the current detail version (SCD2 soft delete)."""
         ts_raw = request.query_params.get("change_ts")
         change_ts = parse_datetime(ts_raw) if ts_raw else timezone.now()
         status_s, _ = close_entity_detail(
@@ -302,13 +322,12 @@ class EntityDetailRetrievePatchDelete(APIView):
     responses={200: OpenApiTypes.OBJECT},
 )
 class EntityHistory(APIView):
+    """Return the full version history for an entity and its details."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request, entity_uid):
         ent = list(
-            Entity.objects.filter(entity_uid=entity_uid)
-            .order_by("valid_from")
-            .values()
+            Entity.objects.filter(entity_uid=entity_uid).order_by("valid_from").values()
         )
         det = list(
             EntityDetail.objects.filter(entity_uid=entity_uid)
@@ -342,6 +361,7 @@ class EntityHistory(APIView):
     },
 )
 class EntitiesAsOf(APIView):
+    """Return the state of all entities at a given point in time."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request):
@@ -395,6 +415,7 @@ class EntitiesAsOf(APIView):
     responses={200: OpenApiTypes.OBJECT},
 )
 class DiffView(APIView):
+    """Return audit log entries within the given time window."""
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     def get(self, request):

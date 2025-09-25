@@ -33,7 +33,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "apps.common.middleware.RequestIdMiddleware",
+    # вимкнено трейс-хедери, якщо немає стека обсервабіліті
+    # "apps.common.middleware.RequestIdMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
