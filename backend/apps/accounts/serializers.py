@@ -3,23 +3,21 @@ from rest_framework import serializers
 
 User = get_user_model()
 
-class UserListSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "is_active", "is_staff"]
 
-class UserDetailSerializer(serializers.ModelSerializer):
+class UserPublicSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "is_active", "is_staff", "date_joined", "last_login"]
-        read_only_fields = ["id", "is_staff", "date_joined", "last_login", "is_active"]
+        fields = ["id", "username", "email"]
+        read_only_fields = ["id", "username", "email"]
+
 
 class UserCreateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, min_length=8)
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "password"]
+        fields = ["id", "username", "email", "password"]
 
     def create(self, validated_data):
         password = validated_data.pop("password")
@@ -28,10 +26,14 @@ class UserCreateSerializer(serializers.ModelSerializer):
         user.save()
         return user
 
+
 class UserUpdateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True)
+
     class Meta:
         model = User
-        fields = ["email", "first_name", "last_name"]
+        fields = ["email"]
+
 
 class PasswordChangeSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True)

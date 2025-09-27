@@ -7,8 +7,7 @@ from rest_framework.views import APIView
 
 from .permissions import IsSelfOrAdmin
 from .serializers import (
-    UserListSerializer,
-    UserDetailSerializer,
+    UserPublicSerializer,
     UserCreateSerializer,
     UserUpdateSerializer,
     PasswordChangeSerializer,
@@ -16,15 +15,12 @@ from .serializers import (
 
 User = get_user_model()
 
+
 @extend_schema_view(
-    post=extend_schema(tags=["users"], summary="Register a new user", request=UserCreateSerializer, responses={201: UserDetailSerializer}),
-    get=extend_schema(tags=["users"], summary="List users (admin only)", responses={200: UserListSerializer(many=True)}),
+    post=extend_schema(tags=["users"], summary="Register a new user", request=UserCreateSerializer, responses={201: UserPublicSerializer}),
+    get=extend_schema(tags=["users"], summary="List users (admin only)", responses={200: UserPublicSerializer(many=True)}),
 )
 class UsersListCreate(APIView):
-    """
-    POST /users/  -> registration (AllowAny)
-    GET  /users/  -> list (IsAdminUser)
-    """
     def get_permissions(self):
         if self.request.method == "POST":
             return [AllowAny()]
@@ -34,16 +30,16 @@ class UsersListCreate(APIView):
         s = UserCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         user = s.save()
-        return Response(UserDetailSerializer(user).data, status=status.HTTP_201_CREATED)
+        return Response(UserPublicSerializer(user).data, status=status.HTTP_201_CREATED)
 
     def get(self, request):
         qs = User.objects.all().order_by("id")
-        return Response(UserListSerializer(qs, many=True).data)
+        return Response(UserPublicSerializer(qs, many=True).data)
 
 
 @extend_schema_view(
-    get=extend_schema(tags=["users"], summary="Get user by id (self or admin)", responses={200: UserDetailSerializer}),
-    patch=extend_schema(tags=["users"], summary="Update user by id (self or admin)", request=UserUpdateSerializer, responses={200: UserDetailSerializer}),
+    get=extend_schema(tags=["users"], summary="Get user by id (self or admin)", responses={200: UserPublicSerializer}),
+    patch=extend_schema(tags=["users"], summary="Update user by id (self or admin)", request=UserUpdateSerializer, responses={200: UserPublicSerializer}),
     delete=extend_schema(tags=["users"], summary="Deactivate user (admin only)", responses={200: OpenApiTypes.OBJECT}),
 )
 class UserRetrieveUpdateDelete(APIView):
@@ -57,7 +53,7 @@ class UserRetrieveUpdateDelete(APIView):
         if not obj:
             return Response({"detail": "not found"}, status=404)
         self.check_object_permissions(request, obj)
-        return Response(UserDetailSerializer(obj).data)
+        return Response(UserPublicSerializer(obj).data)
 
     def patch(self, request, pk):
         obj = self.get_object(pk)
@@ -67,7 +63,7 @@ class UserRetrieveUpdateDelete(APIView):
         s = UserUpdateSerializer(obj, data=request.data, partial=True)
         s.is_valid(raise_exception=True)
         s.save()
-        return Response(UserDetailSerializer(obj).data)
+        return Response(UserPublicSerializer(obj).data)
 
     def delete(self, request, pk):
         if not request.user.is_staff:
@@ -83,20 +79,20 @@ class UserRetrieveUpdateDelete(APIView):
 @extend_schema(
     tags=["users"],
     summary="Get my profile",
-    responses={200: UserDetailSerializer},
+    responses={200: UserPublicSerializer},
 )
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(UserDetailSerializer(request.user).data)
+        return Response(UserPublicSerializer(request.user).data)
 
 
 @extend_schema(
     tags=["users"],
     summary="Update my profile",
     request=UserUpdateSerializer,
-    responses={200: UserDetailSerializer},
+    responses={200: UserPublicSerializer},
 )
 class MeUpdateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -105,7 +101,7 @@ class MeUpdateView(APIView):
         s = UserUpdateSerializer(request.user, data=request.data, partial=True)
         s.is_valid(raise_exception=True)
         s.save()
-        return Response(UserDetailSerializer(request.user).data)
+        return Response(UserPublicSerializer(request.user).data)
 
 
 @extend_schema(
