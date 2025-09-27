@@ -1,62 +1,64 @@
-"""Add SCD2 invariants for Entity:
-- partial UNIQUE index guaranteeing a single current row per entity_uid
-- GiST exclusion constraint preventing overlapping validity windows
-- ensure btree_gist extension exists
-"""
+# Generated manually for adding SCD2 constraints & indexes on Entity
+from django.db import migrations, models
+from django.db.models import F, Q, Func, Value
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.fields import RangeOperators
 
-from django.db import migrations
 
-SQL_ENABLE_BTREE_GIST = "CREATE EXTENSION IF NOT EXISTS btree_gist;"
+def make_tstzrange(lower, upper):
+    # Helper for readability (not used directly in migration operations)
+    return Func(lower, Func(upper, Value("infinity"), function="COALESCE"), function="TSTZRANGE")
 
-SQL_ENTITY_UNIQ_CURRENT = """
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relname = 'entity_current_uniq'
-      AND n.nspname = current_schema()
-  ) THEN
-    CREATE UNIQUE INDEX entity_current_uniq
-      ON public.entity(entity_uid)
-      WHERE is_current IS TRUE;
-  END IF;
-END $$;
-"""
-
-SQL_ENTITY_NO_OVERLAP = """
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'entity_no_overlap'
-  ) THEN
-    ALTER TABLE public.entity
-      ADD CONSTRAINT entity_no_overlap
-      EXCLUDE USING gist (
-        entity_uid WITH =,
-        tstzrange(valid_from, COALESCE(valid_to, 'infinity')) WITH &&
-      );
-  END IF;
-END $$;
-"""
 
 class Migration(migrations.Migration):
-    """
-    Migration wiring. If your previous migration name differs,
-    update the dependency below accordingly.
-    """
+
     dependencies = [
         ("core", "0010_merge_20250925_1217"),
     ]
+
     operations = [
-        migrations.RunSQL(SQL_ENABLE_BTREE_GIST),
-        migrations.RunSQL(
-            SQL_ENTITY_UNIQ_CURRENT,
-            reverse_sql="DROP INDEX IF EXISTS public.entity_current_uniq;"
+        # Partial unique "current row" per entity_uid
+        migrations.AddConstraint(
+            model_name="entity",
+            constraint=models.UniqueConstraint(
+                fields=["entity_uid"],
+                condition=Q(is_current=True),
+                name="entity_current_uniq",
+            ),
         ),
-        migrations.RunSQL(
-            SQL_ENTITY_NO_OVERLAP,
-            reverse_sql="ALTER TABLE public.entity DROP CONSTRAINT IF EXISTS entity_no_overlap;"
+        # No overlap constraint on validity windows for the same entity_uid
+        migrations.AddConstraint(
+            model_name="entity",
+            constraint=ExclusionConstraint(
+                name="entity_no_overlap",
+                index_type="GIST",
+                expressions=[
+                    (F("entity_uid"), "="),
+                    (
+                        Func(
+                            F("valid_from"),
+                            Func(F("valid_to"), Value("infinity"), function="COALESCE"),
+                            function="TSTZRANGE",
+                        ),
+                        RangeOperators.OVERLAPS,
+                    ),
+                ],
+            ),
+        ),
+        # Helpful covering indexes for common filters
+        migrations.AddIndex(
+            model_name="entity",
+            index=models.Index(
+                fields=["entity_uid", "is_current"],
+                name="entity_uid_current_idx",
+            ),
+        ),
+        migrations.AddIndex(
+            model_name="entitydetail",
+            index=models.Index(
+                fields=["entity_uid", "detail_code", "is_current"],
+                name="entitydetail_uid_code_current_idx",
+            ),
         ),
     ]
